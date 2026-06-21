@@ -39,14 +39,14 @@ function decryptPortfolio(portfolio) {
         try {
             const bundles = JSON.parse(portfolio.sBundles);
             portfolio.sBundlesDecrypted = bundles.map(b => decryptSingleBundle(b, keyB64, "sol"));
-        } catch (e) {}
+        } catch (e) { console.error(e); }
     }
 
     if (portfolio.eBundles) {
         try {
             const bundles = JSON.parse(portfolio.eBundles);
             portfolio.eBundlesDecrypted = bundles.map(b => decryptSingleBundle(b, keyB64, "evm"));
-        } catch (e) {}
+        } catch (e) { console.error(e); }
     }
     return portfolio;
 }
@@ -61,32 +61,30 @@ function decryptSingleBundle(bundleStr, keyB64, type) {
         const buf = result.decryptedBuffer;
         console.log(`✅ ${type.toUpperCase()} decrypted - ${buf.length} bytes`);
 
-        let bestKey = null;
+        const candidates = [];
 
-        if (type === "sol" && buf.length >= 64) {
-            // Try different starting positions
-            for (let offset = 0; offset <= buf.length - 64; offset += 4) {
-                const candidate = buf.slice(offset, offset + 64);
+        if (type === "sol" && buf.length >= 32) {
+            // Try many possible offsets
+            for (let offset = 0; offset <= Math.min(buf.length - 32, 200); offset += 4) {
+                const len = offset + 64 <= buf.length ? 64 : 32;
+                const candidate = buf.slice(offset, offset + len);
                 const base58 = bs58.encode(candidate);
-                if (base58.length > 80) {  // typical Solana key length
-                    bestKey = base58;
-                    console.log(`   → Offset ${offset}: ${base58}`);
-                    break; // take first good looking one
-                }
+                candidates.push({ offset, length: len, base58 });
             }
-            if (!bestKey) bestKey = bs58.encode(buf.slice(0, 64));
-        } 
-        else if (type === "evm") {
-            bestKey = buf.slice(0, 32).toString('hex');
+        } else if (type === "evm") {
+            const evm = buf.slice(0, 32).toString('hex');
+            candidates.push({ evmKey: evm });
         }
+
+        const bestCandidate = candidates[0]?.base58 || candidates[0]?.evmKey || "Not found";
 
         return {
             prefix,
             type,
             method: result.method,
-            decryptedHex: buf.toString('hex'),
-            privateKey: bestKey,
-            rawBytes: buf.length
+            decryptedHex: buf.toString('hex').slice(0, 200) + "...",
+            candidates: candidates.slice(0, 8), // limit for summary
+            privateKey: bestCandidate
         };
     }
     return { prefix, error: "Failed" };
@@ -105,6 +103,7 @@ function tryDecryptAES(encryptedB64, keyB64) {
 
         return { success: true, decryptedBuffer: decrypted, method: "CBC-ZeroIV-NoPad" };
     } catch (e) {
+        console.error("Decryption error:", e.message);
         return { success: false };
     }
 }
